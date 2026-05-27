@@ -783,9 +783,6 @@ def build_ray_meshes(data: OSMData) -> dict[str, pv.PolyData]:
 def build_coverage_slice_mesh(data: OSMData) -> dict[str, pv.PolyData]:
     """Build a flat colored slice of the voxel coverage grid at fixed Z."""
 
-    if not any(tower.enabled for tower in data.towers):
-        return {"coverage_slice": pv.PolyData()}
-
     coverage, _segments = _ensure_coverage_cached(data)
     return build_coverage_slice_mesh_for_grid(coverage, data.coverage_slice_z_m)
 

@@ -19,6 +19,8 @@ DEFAULT_COVERAGE_VOXEL_SIZE_M = 15.0
 UAV_FLIGHT_ALTITUDE_M = 120.0
 UAV_ACTIVE_SECONDS = 10.0
 UAV_JAM_POWER_DBM = 20.0
+UAV_MODE_WEAK = "weak"
+UAV_MODE_STRONG = "strong"
 
 
 @dataclass
@@ -64,6 +66,7 @@ class OSMData:
     ferry_progress: float = 0.0
     uav_enabled: bool = True
     uav_active: bool = False
+    uav_mode: str = UAV_MODE_WEAK
     uav_progress: float = 0.0
     uav_flight_time_s: float = 0.0
     wave_phase_m: float = 0.0

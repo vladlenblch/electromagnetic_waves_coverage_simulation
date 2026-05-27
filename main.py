@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+import math
 from pathlib import Path
 
-from city.osm_parser import UAV_ACTIVE_SECONDS
+from city.osm_parser import UAV_ACTIVE_SECONDS, UAV_MODE_STRONG, UAV_MODE_WEAK
 
 PROJECT_ROOT = Path(__file__).parent
 os.environ.setdefault("XDG_CACHE_HOME", str(PROJECT_ROOT / ".cache"))
@@ -56,6 +57,7 @@ TOWER_UPDATE_DELAY_MS = 16
 FERRY_UPDATE_INTERVAL_MS = 200
 FERRY_PROGRESS_STEP = 0.01 / 3.0
 UAV_UPDATE_INTERVAL_MS = 200
+STRONG_UAV_DISABLE_RADIUS_M = 320.0
 WAVE_UPDATE_INTERVAL_MS = 200
 WAVE_PROGRESS_STEP_M = 8.0
 TOWER_ACTOR_PREFIXES = ("tower_enabled", "tower_disabled")
@@ -118,6 +120,7 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         self._coverage_request_id = 0
         self._coverage_job_running = False
         self._coverage_pending = False
+        self._strong_uav_disabled_towers: set[str] = set()
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -136,7 +139,8 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         self.ray_count_spin = QSpinBox()
         self.bounce_spin = QSpinBox()
         self.slice_height_spin = QDoubleSpinBox()
-        self.launch_uav_button = QPushButton("Запустить БПЛА")
+        self.launch_weak_uav_button = QPushButton("Слабый БПЛА")
+        self.launch_strong_uav_button = QPushButton("Сильный БПЛА")
         self.recompute_button = QPushButton("Пересчитать")
         self._init_controls(root_layout)
 
@@ -204,8 +208,10 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
             controls_layout.addWidget(button)
         self.waves_radio.setChecked(True)
 
-        self.launch_uav_button.clicked.connect(self._on_launch_uav_clicked)
-        controls_layout.addWidget(self.launch_uav_button)
+        self.launch_weak_uav_button.clicked.connect(self._on_launch_weak_uav_clicked)
+        self.launch_strong_uav_button.clicked.connect(self._on_launch_strong_uav_clicked)
+        controls_layout.addWidget(self.launch_weak_uav_button)
+        controls_layout.addWidget(self.launch_strong_uav_button)
 
         self.recompute_button.clicked.connect(self._on_recompute_clicked)
         controls_layout.addWidget(self.recompute_button)
@@ -260,6 +266,8 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         for tower_index, is_enabled in next_states.items():
             if previous_states[tower_index] != is_enabled:
                 self.data.tower_wave_phases_m[str(tower_index)] = 0.0
+            if is_enabled:
+                self._strong_uav_disabled_towers.discard(str(tower_index))
         self._invalidate_radio_cache()
         self._refresh_towers()
         self._refresh_visual_mode(force_compute=True)
@@ -308,21 +316,25 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
 
     def _refresh_visual_mode(self, force_compute: bool = False) -> None:
         mode = self._active_visual_mode()
-        self._remove_radio_actors()
         if mode != VISUAL_MODE_WAVES:
             self._wave_timer.stop()
             self._remove_wave_actors()
 
         if mode == VISUAL_MODE_WAVES:
+            self._remove_radio_actors()
             if not self._wave_timer.isActive():
                 self._wave_timer.start(WAVE_UPDATE_INTERVAL_MS)
             self._refresh_waves()
             return
 
         if mode == VISUAL_MODE_RAYS:
+            if COVERAGE_SLICE_ACTOR in self.plotter.actors:
+                self.plotter.remove_actor(COVERAGE_SLICE_ACTOR, render=False)
             self._refresh_rays(force_compute=force_compute)
             return
 
+        if RADIO_RAYS_ACTOR in self.plotter.actors:
+            self.plotter.remove_actor(RADIO_RAYS_ACTOR, render=False)
         self._refresh_coverage(force_compute=force_compute)
 
     def _advance_waves(self) -> None:
@@ -398,12 +410,119 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
             if actor_name.startswith(FERRY_ACTOR_PREFIXES):
                 self.plotter.remove_actor(actor_name, render=False)
 
+    @staticmethod
+    def _tower_center_xy(tower: object) -> tuple[float, float]:
+        footprint = getattr(tower, "footprint", [])
+        xs = [x for x, _ in footprint]
+        ys = [y for _, y in footprint]
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+
+    def _uav_position_xy(self) -> tuple[float, float] | None:
+        if not self.data.uav_enabled or not self.data.uav_active:
+            return None
+
+        if self.data.boundary_xy:
+            xs = [x for x, _ in self.data.boundary_xy]
+            ys = [y for _, y in self.data.boundary_xy]
+            minx, maxx = min(xs), max(xs)
+            miny, maxy = min(ys), max(ys)
+        else:
+            minx, miny, maxx, maxy = self.data.bounds_xy
+
+        progress = min(1.0, max(0.0, float(self.data.uav_progress)))
+        x = minx - 80.0 + progress * ((maxx - minx) + 160.0)
+        y = (miny + maxy) * 0.5
+        return x, y
+
+    @staticmethod
+    def _set_checkbox_checked_silently(checkbox: object, checked: bool) -> None:
+        was_blocked = checkbox.blockSignals(True)
+        checkbox.setChecked(checked)
+        checkbox.blockSignals(was_blocked)
+
+    def _sync_tower_checkboxes_from_data(self) -> None:
+        self._set_checkbox_checked_silently(
+            self.tower_1_checkbox,
+            self._is_perimeter_tower_enabled(1),
+        )
+        self._set_checkbox_checked_silently(
+            self.tower_2_checkbox,
+            self._is_perimeter_tower_enabled(2),
+        )
+
+    def _set_perimeter_tower_state(self, tower_key: str, enabled: bool) -> bool:
+        tower_name = f"perimeter_tower_{tower_key}"
+        for tower in self.data.towers:
+            if tower.name == tower_name and tower.enabled != enabled:
+                tower.enabled = enabled
+                self.data.tower_wave_phases_m[tower_key] = 0.0
+                return True
+        return False
+
+    def _restore_strong_uav_disabled_towers(self) -> bool:
+        changed = False
+        for tower_key in list(self._strong_uav_disabled_towers):
+            changed = self._set_perimeter_tower_state(tower_key, True) or changed
+            self._strong_uav_disabled_towers.discard(tower_key)
+        return changed
+
+    def _refresh_after_tower_state_change(self) -> None:
+        self._sync_tower_checkboxes_from_data()
+        self._invalidate_radio_cache()
+        self._refresh_towers()
+        self._refresh_visual_mode(force_compute=True)
+
+    def _apply_strong_uav_effect(self) -> bool:
+        if (
+            not self.data.uav_enabled
+            or self.data.uav_mode != UAV_MODE_STRONG
+        ):
+            return False
+
+        if not self.data.uav_active:
+            restored = self._restore_strong_uav_disabled_towers()
+            if restored:
+                self._refresh_after_tower_state_change()
+            return restored
+
+        uav_position = self._uav_position_xy()
+        if uav_position is None:
+            return False
+
+        ux, uy = uav_position
+        affected_tower_keys: set[str] = set()
+        changed = False
+        for tower in self.data.towers:
+            tower_key = self._perimeter_tower_key(tower)
+            if tower_key is None:
+                continue
+            tx, ty = self._tower_center_xy(tower)
+            distance_m = math.hypot(tx - ux, ty - uy)
+            if distance_m <= STRONG_UAV_DISABLE_RADIUS_M:
+                affected_tower_keys.add(tower_key)
+                if tower.enabled:
+                    tower.enabled = False
+                    self._strong_uav_disabled_towers.add(tower_key)
+                    self.data.tower_wave_phases_m[tower_key] = 0.0
+                    changed = True
+
+        for tower_key in list(self._strong_uav_disabled_towers):
+            if tower_key in affected_tower_keys:
+                continue
+            changed = self._set_perimeter_tower_state(tower_key, True) or changed
+            self._strong_uav_disabled_towers.discard(tower_key)
+
+        if changed:
+            self._refresh_after_tower_state_change()
+        return changed
+
     def _advance_uav(self) -> None:
         if not self._scene_ready:
             return
 
         step_s = UAV_UPDATE_INTERVAL_MS / 1000.0
         was_active = self.data.uav_active
+        was_weak = self.data.uav_mode == UAV_MODE_WEAK
         self.data.uav_flight_time_s += step_s
         self.data.uav_active = self.data.uav_flight_time_s < UAV_ACTIVE_SECONDS
         self.data.uav_progress = (
@@ -414,11 +533,15 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         if not self.data.uav_active:
             self._uav_timer.stop()
 
+        strong_effect_changed = self._apply_strong_uav_effect()
+
         if self.data.uav_active or was_active:
             self._refresh_uav()
         if (
             self._active_visual_mode() == VISUAL_MODE_COVERAGE
+            and was_weak
             and (self.data.uav_active or was_active)
+            and not strong_effect_changed
         ):
             self._refresh_coverage()
 
@@ -433,18 +556,38 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         add_city_to_plotter(self.plotter, build_uav_meshes(self.data))
         self.plotter.render()
 
-    def _on_launch_uav_clicked(self) -> None:
+    def _start_uav(self, mode: str) -> None:
         if not self._scene_ready or not self.data.uav_enabled:
             return
 
+        restored_previous_strong_effect = self._restore_strong_uav_disabled_towers()
+        self.data.uav_mode = mode
         self.data.uav_active = True
         self.data.uav_progress = 0.0
         self.data.uav_flight_time_s = 0.0
         self._refresh_uav()
-        if self._active_visual_mode() == VISUAL_MODE_COVERAGE:
+
+        strong_effect_changed = (
+            self._apply_strong_uav_effect()
+            if mode == UAV_MODE_STRONG
+            else False
+        )
+        tower_state_changed = restored_previous_strong_effect or strong_effect_changed
+        if restored_previous_strong_effect and not strong_effect_changed:
+            self._refresh_after_tower_state_change()
+        if (
+            self._active_visual_mode() == VISUAL_MODE_COVERAGE
+            and (mode == UAV_MODE_WEAK or not tower_state_changed)
+        ):
             self._refresh_coverage()
         if not self._uav_timer.isActive():
             self._uav_timer.start(UAV_UPDATE_INTERVAL_MS)
+
+    def _on_launch_weak_uav_clicked(self) -> None:
+        self._start_uav(UAV_MODE_WEAK)
+
+    def _on_launch_strong_uav_clicked(self) -> None:
+        self._start_uav(UAV_MODE_STRONG)
 
     def _sync_radio_settings_from_ui(self) -> None:
         self.data.ray_count = int(self.ray_count_spin.value())
@@ -549,8 +692,6 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         if self._active_visual_mode() == VISUAL_MODE_COVERAGE:
             if is_current:
                 self._draw_cached_coverage()
-            else:
-                self._draw_coverage_result(coverage_result)
 
         if self._coverage_pending and self._active_visual_mode() == VISUAL_MODE_COVERAGE:
             self._refresh_coverage()
@@ -627,6 +768,7 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
             ferry_progress=self.data.ferry_progress,
             uav_enabled=self.data.uav_enabled,
             uav_active=self.data.uav_active,
+            uav_mode=self.data.uav_mode,
             uav_progress=self.data.uav_progress,
             uav_flight_time_s=self.data.uav_flight_time_s,
             wave_phase_m=self.data.wave_phase_m,

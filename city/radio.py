@@ -23,7 +23,13 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 
-from .osm_parser import OSMData, Tower, UAV_FLIGHT_ALTITUDE_M, UAV_JAM_POWER_DBM
+from .osm_parser import (
+    OSMData,
+    Tower,
+    UAV_FLIGHT_ALTITUDE_M,
+    UAV_JAM_POWER_DBM,
+    UAV_MODE_WEAK,
+)
 
 
 TX_POWER_DBM = 46.0
@@ -515,6 +521,9 @@ def _compute_uav_jam_grid(
     voxel_size: float,
     grid_shape: tuple[int, int, int],
 ) -> np.ndarray | None:
+    if getattr(data, "uav_mode", UAV_MODE_WEAK) != UAV_MODE_WEAK:
+        return None
+
     uav_position = _uav_position_xyz(data)
     if uav_position is None:
         return None
@@ -532,6 +541,12 @@ def _compute_uav_jam_grid(
 def coverage_signature(data: OSMData) -> tuple:
     """Cheap signature so we can detect when recompute is needed."""
 
+    uav_mode = getattr(data, "uav_mode", UAV_MODE_WEAK)
+    uav_jam_active = (
+        bool(data.uav_enabled)
+        and bool(data.uav_active)
+        and uav_mode == UAV_MODE_WEAK
+    )
     towers_sig = tuple(
         (
             tower.name,
@@ -549,9 +564,10 @@ def coverage_signature(data: OSMData) -> tuple:
         bool(data.ferry_enabled),
         float(round(float(data.ferry_progress % 1.0), 3)) if data.ferry_enabled else None,
         bool(data.uav_enabled),
-        bool(data.uav_active) if data.uav_enabled else None,
+        uav_mode if uav_jam_active else None,
+        True if uav_jam_active else None,
         float(round(float(data.uav_progress), 3))
-        if data.uav_enabled and data.uav_active
+        if uav_jam_active
         else None,
         towers_sig,
         _scene_geometry_digest(data),
