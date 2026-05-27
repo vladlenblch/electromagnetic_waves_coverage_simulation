@@ -26,9 +26,9 @@ import pyvista as pv
 from .osm_parser import (
     OSMData,
     Tower,
-    UAV_FLIGHT_ALTITUDE_M,
     UAV_JAM_POWER_DBM,
     UAV_MODE_WEAK,
+    uav_position_xyz,
 )
 
 
@@ -496,25 +496,6 @@ def _grid_bounds_for_data(data: OSMData) -> tuple[float, float, float, float, fl
     return (minx, maxx, miny, maxy, z_min, z_max)
 
 
-def _uav_position_xyz(data: OSMData) -> tuple[float, float, float] | None:
-    if not data.uav_enabled or not data.uav_active:
-        return None
-
-    if data.boundary_xy:
-        xs = [x for x, _ in data.boundary_xy]
-        ys = [y for _, y in data.boundary_xy]
-        minx, maxx = min(xs), max(xs)
-        miny, maxy = min(ys), max(ys)
-    else:
-        minx, miny, maxx, maxy = data.bounds_xy
-
-    margin_m = 80.0
-    progress = float(np.clip(data.uav_progress, 0.0, 1.0))
-    x = minx - margin_m + progress * ((maxx - minx) + margin_m * 2.0)
-    y = (miny + maxy) * 0.5
-    return (x, y, UAV_FLIGHT_ALTITUDE_M)
-
-
 def _compute_uav_jam_grid(
     data: OSMData,
     grid_origin: np.ndarray,
@@ -524,7 +505,7 @@ def _compute_uav_jam_grid(
     if getattr(data, "uav_mode", UAV_MODE_WEAK) != UAV_MODE_WEAK:
         return None
 
-    uav_position = _uav_position_xyz(data)
+    uav_position = uav_position_xyz(data)
     if uav_position is None:
         return None
 
@@ -547,6 +528,19 @@ def coverage_signature(data: OSMData) -> tuple:
         and bool(data.uav_active)
         and uav_mode == UAV_MODE_WEAK
     )
+    uav_path_sig = (
+        getattr(data, "uav_flight_mode", "basic"),
+        float(round(float(getattr(data, "uav_path_angle_rad", 0.0)), 6)),
+        tuple(
+            float(round(float(value), 3))
+            for value in (getattr(data, "uav_path_start_xy", None) or ())
+        ),
+        tuple(
+            float(round(float(value), 3))
+            for value in (getattr(data, "uav_path_end_xy", None) or ())
+        ),
+        float(round(float(getattr(data, "uav_flight_duration_s", 10.0)), 3)),
+    )
     towers_sig = tuple(
         (
             tower.name,
@@ -565,6 +559,7 @@ def coverage_signature(data: OSMData) -> tuple:
         float(round(float(data.ferry_progress % 1.0), 3)) if data.ferry_enabled else None,
         bool(data.uav_enabled),
         uav_mode if uav_jam_active else None,
+        uav_path_sig if uav_jam_active else None,
         True if uav_jam_active else None,
         float(round(float(data.uav_progress), 3))
         if uav_jam_active

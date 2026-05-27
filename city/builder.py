@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pyvista as pv
 
-from .osm_parser import Building, OSMData, Tower, UAV_FLIGHT_ALTITUDE_M
+from .osm_parser import Building, OSMData, Tower, uav_position_xyz
 from .radio import (
     CoverageGrid,
     NOISE_FLOOR_DBM,
@@ -43,7 +43,6 @@ WAVE_RESOLUTION = 96
 WAVE_PLANE_ANGLES_DEG = (10.0, 24.0, 38.0, 52.0, 66.0, 80.0)
 WAVE_MESH_PREFIX = "tower_waves_"
 COVERAGE_SLICE_RENDER_OFFSET_M = 0.5
-UAV_PATH_MARGIN_M = 80.0
 UAV_BODY_LENGTH_M = 24.0
 UAV_BODY_WIDTH_M = 8.0
 UAV_BODY_HEIGHT_M = 4.0
@@ -567,24 +566,8 @@ def build_ferry_meshes(data: OSMData) -> dict[str, pv.MultiBlock]:
     return {"ferry_body": body}
 
 
-def _uav_position(data: OSMData) -> tuple[float, float, float] | None:
-    if not data.uav_enabled or not data.uav_active:
-        return None
-    bounds = _bounds_from_points(data.boundary_xy) if data.boundary_xy else None
-    if bounds is None:
-        minx, miny, maxx, maxy = data.bounds_xy
-    else:
-        minx, miny, maxx, maxy = bounds
-    progress = float(np.clip(data.uav_progress, 0.0, 1.0))
-    x = minx - UAV_PATH_MARGIN_M + progress * (
-        (maxx - minx) + UAV_PATH_MARGIN_M * 2.0
-    )
-    y = (miny + maxy) * 0.5
-    return (x, y, UAV_FLIGHT_ALTITUDE_M)
-
-
 def build_uav_meshes(data: OSMData) -> dict[str, pv.MultiBlock]:
-    position = _uav_position(data)
+    position = uav_position_xyz(data)
     body = pv.MultiBlock()
     if position is None:
         return {"uav_body": body}

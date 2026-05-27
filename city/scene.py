@@ -30,9 +30,9 @@ STYLE = {
     "tower_waves_2": {"color": "#ff7a45", "opacity": 0.5, "line_width": 2.0},
     "buildings": {"color": "#d0d4dc", "show_edges": False},
     "building_edges": {"color": "#606672", "line_width": 1.2},
-    "tower_enabled": {"color": "#18b957", "show_edges": False, "smooth_shading": True},
-    "tower_disabled": {"color": "#d84f4f", "show_edges": False, "smooth_shading": True},
-    "tower_edges": {"color": "#36424a", "line_width": 1.0},
+    "tower_enabled": {"color": "#d0d4dc", "show_edges": False, "smooth_shading": True},
+    "tower_disabled": {"color": "#d0d4dc", "show_edges": False, "smooth_shading": True},
+    "tower_edges": {"color": "#606672", "line_width": 1.0},
     "radio_rays": {"line_width": 1.5, "opacity": 0.85},
     "coverage_slice": {"opacity": 0.7, "show_edges": False},
 }

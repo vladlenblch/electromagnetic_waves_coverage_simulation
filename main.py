@@ -10,9 +10,20 @@ import os
 import sys
 import traceback
 import math
+import random
 from pathlib import Path
 
-from city.osm_parser import UAV_ACTIVE_SECONDS, UAV_MODE_STRONG, UAV_MODE_WEAK
+from city.osm_parser import (
+    UAV_ACTIVE_SECONDS,
+    UAV_DEFAULT_PATH_ANGLE_RAD,
+    UAV_FLIGHT_MODE_BASIC,
+    UAV_FLIGHT_MODE_STRONG_RANDOM,
+    UAV_FLIGHT_MODE_WEAK_RANDOM,
+    UAV_MODE_STRONG,
+    UAV_MODE_WEAK,
+    uav_bounds_xy,
+    uav_position_xyz,
+)
 
 PROJECT_ROOT = Path(__file__).parent
 os.environ.setdefault("XDG_CACHE_HOME", str(PROJECT_ROOT / ".cache"))
@@ -57,7 +68,7 @@ TOWER_UPDATE_DELAY_MS = 16
 FERRY_UPDATE_INTERVAL_MS = 200
 FERRY_PROGRESS_STEP = 0.01 / 3.0
 UAV_UPDATE_INTERVAL_MS = 200
-STRONG_UAV_DISABLE_RADIUS_M = 320.0
+STRONG_UAV_DISABLE_RADIUS_M = 352.0
 WAVE_UPDATE_INTERVAL_MS = 200
 WAVE_PROGRESS_STEP_M = 8.0
 TOWER_ACTOR_PREFIXES = ("tower_enabled", "tower_disabled")
@@ -132,6 +143,10 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         self.tower_1_checkbox = QCheckBox("Вышка 1")
         self.tower_2_checkbox = QCheckBox("Вышка 2")
         self.ferry_checkbox = QCheckBox("Паром")
+        self.uav_flight_mode_group = QButtonGroup(self)
+        self.uav_basic_flight_radio = QRadioButton("Без рандомизации")
+        self.uav_weak_random_flight_radio = QRadioButton("Слабая рандомизация")
+        self.uav_strong_random_flight_radio = QRadioButton("Сильная рандомизация")
         self.visual_mode_group = QButtonGroup(self)
         self.waves_radio = QRadioButton("Динамические волны")
         self.rays_radio = QRadioButton("Лучи")
@@ -174,6 +189,17 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         self.ferry_checkbox.setChecked(True)
         self.ferry_checkbox.stateChanged.connect(self._on_ferry_enabled_changed)
         controls_layout.addWidget(self.ferry_checkbox)
+
+        controls_layout.addWidget(QLabel("Полет БПЛА"))
+        self.uav_flight_mode_group.setExclusive(True)
+        for button in (
+            self.uav_basic_flight_radio,
+            self.uav_weak_random_flight_radio,
+            self.uav_strong_random_flight_radio,
+        ):
+            self.uav_flight_mode_group.addButton(button)
+            controls_layout.addWidget(button)
+        self.uav_basic_flight_radio.setChecked(True)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
@@ -417,22 +443,84 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         ys = [y for _, y in footprint]
         return sum(xs) / len(xs), sum(ys) / len(ys)
 
+    @staticmethod
+    def _path_length_m(
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> float:
+        return math.hypot(end[0] - start[0], end[1] - start[1])
+
+    @staticmethod
+    def _random_boundary_point(
+        bounds_xy: tuple[float, float, float, float],
+    ) -> tuple[tuple[float, float], int]:
+        minx, miny, maxx, maxy = bounds_xy
+        side = random.randrange(4)
+        if side == 0:
+            return (random.uniform(minx, maxx), miny), side
+        if side == 1:
+            return (maxx, random.uniform(miny, maxy)), side
+        if side == 2:
+            return (random.uniform(minx, maxx), maxy), side
+        return (minx, random.uniform(miny, maxy)), side
+
+    def _base_uav_speed_mps(self) -> float:
+        minx, _miny, maxx, _maxy = uav_bounds_xy(self.data)
+        return ((maxx - minx) + 160.0) / UAV_ACTIVE_SECONDS
+
+    def _random_strong_uav_path(
+        self,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        bounds_xy = uav_bounds_xy(self.data)
+        minx, miny, maxx, maxy = bounds_xy
+        diagonal_m = math.hypot(maxx - minx, maxy - miny)
+        min_length_m = diagonal_m * 0.45
+
+        fallback_start = (minx, random.uniform(miny, maxy))
+        fallback_end = (maxx, random.uniform(miny, maxy))
+        for _attempt in range(80):
+            start, start_side = self._random_boundary_point(bounds_xy)
+            end, end_side = self._random_boundary_point(bounds_xy)
+            if start_side == end_side:
+                continue
+            if self._path_length_m(start, end) >= min_length_m:
+                return start, end
+        return fallback_start, fallback_end
+
+    def _selected_uav_flight_mode(self) -> str:
+        if self.uav_strong_random_flight_radio.isChecked():
+            return UAV_FLIGHT_MODE_STRONG_RANDOM
+        if self.uav_weak_random_flight_radio.isChecked():
+            return UAV_FLIGHT_MODE_WEAK_RANDOM
+        return UAV_FLIGHT_MODE_BASIC
+
+    def _configure_uav_flight_path(self) -> None:
+        flight_mode = self._selected_uav_flight_mode()
+        self.data.uav_flight_mode = flight_mode
+        self.data.uav_path_start_xy = None
+        self.data.uav_path_end_xy = None
+        self.data.uav_path_angle_rad = UAV_DEFAULT_PATH_ANGLE_RAD
+        self.data.uav_flight_duration_s = UAV_ACTIVE_SECONDS
+
+        if flight_mode == UAV_FLIGHT_MODE_WEAK_RANDOM:
+            self.data.uav_path_angle_rad = random.random() * 2.0 * math.pi
+            return
+
+        if flight_mode == UAV_FLIGHT_MODE_STRONG_RANDOM:
+            start, end = self._random_strong_uav_path()
+            self.data.uav_path_start_xy = start
+            self.data.uav_path_end_xy = end
+            speed_mps = max(self._base_uav_speed_mps(), 1.0)
+            self.data.uav_flight_duration_s = max(
+                UAV_UPDATE_INTERVAL_MS / 1000.0,
+                self._path_length_m(start, end) / speed_mps,
+            )
+
     def _uav_position_xy(self) -> tuple[float, float] | None:
-        if not self.data.uav_enabled or not self.data.uav_active:
+        position = uav_position_xyz(self.data)
+        if position is None:
             return None
-
-        if self.data.boundary_xy:
-            xs = [x for x, _ in self.data.boundary_xy]
-            ys = [y for _, y in self.data.boundary_xy]
-            minx, maxx = min(xs), max(xs)
-            miny, maxy = min(ys), max(ys)
-        else:
-            minx, miny, maxx, maxy = self.data.bounds_xy
-
-        progress = min(1.0, max(0.0, float(self.data.uav_progress)))
-        x = minx - 80.0 + progress * ((maxx - minx) + 160.0)
-        y = (miny + maxy) * 0.5
-        return x, y
+        return position[0], position[1]
 
     @staticmethod
     def _set_checkbox_checked_silently(checkbox: object, checked: bool) -> None:
@@ -523,10 +611,11 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
         step_s = UAV_UPDATE_INTERVAL_MS / 1000.0
         was_active = self.data.uav_active
         was_weak = self.data.uav_mode == UAV_MODE_WEAK
+        flight_duration_s = max(float(self.data.uav_flight_duration_s), step_s)
         self.data.uav_flight_time_s += step_s
-        self.data.uav_active = self.data.uav_flight_time_s < UAV_ACTIVE_SECONDS
+        self.data.uav_active = self.data.uav_flight_time_s < flight_duration_s
         self.data.uav_progress = (
-            self.data.uav_flight_time_s / UAV_ACTIVE_SECONDS
+            self.data.uav_flight_time_s / flight_duration_s
             if self.data.uav_active
             else 1.0
         )
@@ -562,6 +651,7 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
 
         restored_previous_strong_effect = self._restore_strong_uav_disabled_towers()
         self.data.uav_mode = mode
+        self._configure_uav_flight_path()
         self.data.uav_active = True
         self.data.uav_progress = 0.0
         self.data.uav_flight_time_s = 0.0
@@ -769,6 +859,11 @@ class MainWindow(QMainWindow):  # type: ignore[misc]
             uav_enabled=self.data.uav_enabled,
             uav_active=self.data.uav_active,
             uav_mode=self.data.uav_mode,
+            uav_flight_mode=self.data.uav_flight_mode,
+            uav_path_angle_rad=self.data.uav_path_angle_rad,
+            uav_path_start_xy=self.data.uav_path_start_xy,
+            uav_path_end_xy=self.data.uav_path_end_xy,
+            uav_flight_duration_s=self.data.uav_flight_duration_s,
             uav_progress=self.data.uav_progress,
             uav_flight_time_s=self.data.uav_flight_time_s,
             wave_phase_m=self.data.wave_phase_m,

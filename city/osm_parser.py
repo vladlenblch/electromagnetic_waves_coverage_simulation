@@ -6,6 +6,7 @@ We only extract what the 3D scene needs:
 
 from __future__ import annotations
 
+import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,11 @@ UAV_ACTIVE_SECONDS = 10.0
 UAV_JAM_POWER_DBM = 20.0
 UAV_MODE_WEAK = "weak"
 UAV_MODE_STRONG = "strong"
+UAV_PATH_MARGIN_M = 80.0
+UAV_DEFAULT_PATH_ANGLE_RAD = 0.0
+UAV_FLIGHT_MODE_BASIC = "basic"
+UAV_FLIGHT_MODE_WEAK_RANDOM = "weak_random"
+UAV_FLIGHT_MODE_STRONG_RANDOM = "strong_random"
 
 
 @dataclass
@@ -67,6 +73,11 @@ class OSMData:
     uav_enabled: bool = True
     uav_active: bool = False
     uav_mode: str = UAV_MODE_WEAK
+    uav_flight_mode: str = UAV_FLIGHT_MODE_BASIC
+    uav_path_angle_rad: float = UAV_DEFAULT_PATH_ANGLE_RAD
+    uav_path_start_xy: tuple[float, float] | None = None
+    uav_path_end_xy: tuple[float, float] | None = None
+    uav_flight_duration_s: float = UAV_ACTIVE_SECONDS
     uav_progress: float = 0.0
     uav_flight_time_s: float = 0.0
     wave_phase_m: float = 0.0
@@ -79,6 +90,73 @@ class OSMData:
     coverage_signature: tuple = ()
     coverage_cache: dict[tuple, object] = field(default_factory=dict)
     coverage_cache_order: list[tuple] = field(default_factory=list)
+
+
+def uav_bounds_xy(data: OSMData) -> tuple[float, float, float, float]:
+    if data.boundary_xy:
+        xs = [x for x, _ in data.boundary_xy]
+        ys = [y for _, y in data.boundary_xy]
+        return min(xs), min(ys), max(xs), max(ys)
+    return data.bounds_xy
+
+
+def _center_path_endpoints_xy(
+    bounds_xy: tuple[float, float, float, float],
+    angle_rad: float,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    minx, miny, maxx, maxy = bounds_xy
+    center_x = (minx + maxx) * 0.5
+    center_y = (miny + maxy) * 0.5
+    direction_x = math.cos(angle_rad)
+    direction_y = math.sin(angle_rad)
+    corners = (
+        (minx, miny),
+        (maxx, miny),
+        (maxx, maxy),
+        (minx, maxy),
+    )
+    half_span_m = (
+        max(
+            abs((x - center_x) * direction_x + (y - center_y) * direction_y)
+            for x, y in corners
+        )
+        + UAV_PATH_MARGIN_M
+    )
+    start = (
+        center_x - direction_x * half_span_m,
+        center_y - direction_y * half_span_m,
+    )
+    end = (
+        center_x + direction_x * half_span_m,
+        center_y + direction_y * half_span_m,
+    )
+    return start, end
+
+
+def uav_path_endpoints_xy(data: OSMData) -> tuple[tuple[float, float], tuple[float, float]]:
+    if data.uav_path_start_xy is not None and data.uav_path_end_xy is not None:
+        return data.uav_path_start_xy, data.uav_path_end_xy
+
+    bounds_xy = uav_bounds_xy(data)
+    angle = (
+        float(data.uav_path_angle_rad)
+        if data.uav_flight_mode == UAV_FLIGHT_MODE_WEAK_RANDOM
+        else UAV_DEFAULT_PATH_ANGLE_RAD
+    )
+    return _center_path_endpoints_xy(bounds_xy, angle)
+
+
+def uav_position_xyz(data: OSMData) -> tuple[float, float, float] | None:
+    """Return the current UAV position for the active flight path."""
+
+    if not data.uav_enabled or not data.uav_active:
+        return None
+
+    start, end = uav_path_endpoints_xy(data)
+    progress = min(1.0, max(0.0, float(data.uav_progress)))
+    x = start[0] + (end[0] - start[0]) * progress
+    y = start[1] + (end[1] - start[1]) * progress
+    return (x, y, UAV_FLIGHT_ALTITUDE_M)
 
 
 def _parse_height(tags: dict[str, str]) -> float:
