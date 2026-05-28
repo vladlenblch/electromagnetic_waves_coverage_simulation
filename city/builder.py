@@ -735,13 +735,50 @@ def compute_coverage_result(
     return signature, (coverage, line_segments)
 
 
+def _clip_segment_to_bounds(
+    start: np.ndarray,
+    end: np.ndarray,
+    bounds_xyz: tuple[float, float, float, float, float, float],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    minx, maxx, miny, maxy, zmin, zmax = bounds_xyz
+    lower = np.array((minx, miny, zmin), dtype=np.float64)
+    upper = np.array((maxx, maxy, zmax), dtype=np.float64)
+    start64 = start.astype(np.float64, copy=False)
+    end64 = end.astype(np.float64, copy=False)
+    delta = end64 - start64
+    t_min = 0.0
+    t_max = 1.0
+
+    for axis in range(3):
+        if abs(delta[axis]) < 1e-9:
+            if start64[axis] < lower[axis] or start64[axis] > upper[axis]:
+                return None
+            continue
+
+        inv_delta = 1.0 / delta[axis]
+        t1 = (lower[axis] - start64[axis]) * inv_delta
+        t2 = (upper[axis] - start64[axis]) * inv_delta
+        t_near = min(t1, t2)
+        t_far = max(t1, t2)
+        t_min = max(t_min, t_near)
+        t_max = min(t_max, t_far)
+        if t_min > t_max:
+            return None
+
+    clipped_start = start64 + delta * t_min
+    clipped_end = start64 + delta * t_max
+    if float(np.linalg.norm(clipped_end - clipped_start)) < 1e-6:
+        return None
+    return clipped_start, clipped_end
+
+
 def build_ray_meshes(data: OSMData) -> dict[str, pv.PolyData]:
     """Trace antenna rays and return a colored line mesh per tower."""
 
     if not any(tower.enabled for tower in data.towers):
         return {"radio_rays": pv.PolyData()}
 
-    _coverage, line_segments = _ensure_coverage_cached(data)
+    coverage, line_segments = _ensure_coverage_cached(data)
     if not line_segments:
         return {"radio_rays": pv.PolyData()}
 
@@ -749,11 +786,18 @@ def build_ray_meshes(data: OSMData) -> dict[str, pv.PolyData]:
     lines: list[int] = []
     scalars: list[float] = []
     for start, end, power_dbm in line_segments:
+        clipped = _clip_segment_to_bounds(start, end, coverage.bounds_xyz)
+        if clipped is None:
+            continue
+        start, end = clipped
         index = len(points)
         points.append(tuple(start))
         points.append(tuple(end))
         lines.extend((2, index, index + 1))
         scalars.append(power_dbm)
+
+    if not points:
+        return {"radio_rays": pv.PolyData()}
 
     poly = pv.PolyData(
         np.array(points, dtype=np.float32),
