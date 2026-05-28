@@ -53,7 +53,7 @@ DEFAULT_REFLECTION_LOSS_DB = 10.0
 
 WAVE_SOURCE_HEIGHT_RATIO = 0.9
 MAX_COVERAGE_CACHE_ITEMS = 128
-COVERAGE_CACHE_VERSION = 7
+COVERAGE_CACHE_VERSION = 8
 COVERAGE_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "coverage"
 MAX_STATIC_RAY_CACHE_ITEMS = 16
 
@@ -439,6 +439,9 @@ def _trace_ray_segments(
         )
 
         if hit is None:
+            return segments
+
+        if hit_material == "boundary":
             return segments
 
         cumulative_path_m += segment_distance

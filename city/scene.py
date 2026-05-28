@@ -33,7 +33,7 @@ STYLE = {
     "tower_enabled": {"color": "#d0d4dc", "show_edges": False, "smooth_shading": True},
     "tower_disabled": {"color": "#d0d4dc", "show_edges": False, "smooth_shading": True},
     "tower_edges": {"color": "#606672", "line_width": 1.0},
-    "radio_rays": {"line_width": 1.5, "opacity": 0.85},
+    "radio_rays": {"line_width": 0.8, "opacity": 0.32},
     "coverage_slice": {"opacity": 0.7, "show_edges": False},
 }
 

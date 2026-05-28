@@ -850,18 +850,30 @@ def _build_boundary_walls_mesh(boundary_xy: list[tuple[float, float]]) -> pv.Pol
 
     points: list[tuple[float, float, float]] = []
     faces: list[int] = []
-    for i, (x1, y1) in enumerate(boundary_xy):
-        x2, y2 = boundary_xy[(i + 1) % len(boundary_xy)]
-        start_index = len(points)
-        points.extend(
-            [
-                (x1, y1, GROUND_Z),
-                (x2, y2, GROUND_Z),
-                (x2, y2, BOUNDARY_WALL_HEIGHT_M),
-                (x1, y1, BOUNDARY_WALL_HEIGHT_M),
-            ]
+    bottom_indexes: list[int] = []
+    top_indexes: list[int] = []
+
+    for x, y in boundary_xy:
+        bottom_indexes.append(len(points))
+        points.append((x, y, GROUND_Z))
+    for x, y in boundary_xy:
+        top_indexes.append(len(points))
+        points.append((x, y, BOUNDARY_WALL_HEIGHT_M))
+
+    for i in range(len(boundary_xy)):
+        next_i = (i + 1) % len(boundary_xy)
+        faces.extend(
+            (
+                4,
+                bottom_indexes[i],
+                bottom_indexes[next_i],
+                top_indexes[next_i],
+                top_indexes[i],
+            )
         )
-        faces.extend((4, start_index, start_index + 1, start_index + 2, start_index + 3))
+
+    faces.extend((len(bottom_indexes), *reversed(bottom_indexes)))
+    faces.extend((len(top_indexes), *top_indexes))
 
     return pv.PolyData(
         np.array(points, dtype=np.float32),
