@@ -53,7 +53,7 @@ DEFAULT_REFLECTION_LOSS_DB = 10.0
 
 WAVE_SOURCE_HEIGHT_RATIO = 0.9
 MAX_COVERAGE_CACHE_ITEMS = 128
-COVERAGE_CACHE_VERSION = 8
+COVERAGE_CACHE_VERSION = 9
 COVERAGE_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "coverage"
 MAX_STATIC_RAY_CACHE_ITEMS = 16
 
@@ -380,6 +380,32 @@ def _closest_hit(
     return nearest_distance, nearest_point, normal, material
 
 
+def _box_exit_distance(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    bounds_xyz: tuple[float, float, float, float, float, float],
+) -> float | None:
+    """Distance from an inside point to the first box face along ``direction``."""
+
+    minx, maxx, miny, maxy, zmin, zmax = bounds_xyz
+    distances: list[float] = []
+    for coordinate, step, lower, upper in (
+        (origin[0], direction[0], minx, maxx),
+        (origin[1], direction[1], miny, maxy),
+        (origin[2], direction[2], zmin, zmax),
+    ):
+        if abs(step) < 1e-9:
+            continue
+        face = upper if step > 0.0 else lower
+        distance = (face - coordinate) / step
+        if distance > 1e-6:
+            distances.append(float(distance))
+
+    if not distances:
+        return None
+    return min(distances)
+
+
 def _trace_ray_segments(
     source_xyz: np.ndarray,
     direction: np.ndarray,
@@ -387,6 +413,7 @@ def _trace_ray_segments(
     cell_normals: np.ndarray,
     max_bounces: int,
     grid_max_distance: float,
+    trace_bounds_xyz: tuple[float, float, float, float, float, float],
 ) -> list[RaySegment]:
     """Trace one ray with up to ``max_bounces`` reflections."""
 
@@ -398,18 +425,31 @@ def _trace_ray_segments(
     current_dir = direction
 
     for _bounce_index in range(max_bounces + 1):
+        boundary_distance = _box_exit_distance(origin, current_dir, trace_bounds_xyz)
+        trace_distance = min(
+            grid_max_distance,
+            boundary_distance if boundary_distance is not None else grid_max_distance,
+        )
         if reflectors is None:
             hit = None
         else:
             hit = _closest_hit(
-                reflectors, origin, current_dir, grid_max_distance, cell_normals
+                reflectors, origin, current_dir, trace_distance, cell_normals
             )
         if hit is None:
-            segment_end = origin + current_dir * grid_max_distance
-            segment_distance = grid_max_distance
+            segment_end = origin + current_dir * trace_distance
+            segment_distance = trace_distance
+            hit_material = "boundary" if boundary_distance is not None else ""
         else:
             segment_distance, hit_point, hit_normal, hit_material = hit
             segment_end = hit_point
+            if (
+                boundary_distance is not None
+                and segment_distance >= boundary_distance - 1e-5
+            ):
+                segment_distance = boundary_distance
+                segment_end = origin + current_dir * boundary_distance
+                hit_material = "boundary"
 
         if segment_distance < RAY_MIN_SEGMENT_M:
             break
@@ -584,6 +624,7 @@ def _static_ray_signature(data: OSMData) -> tuple:
         for tower in data.towers
     )
     return (
+        COVERAGE_CACHE_VERSION,
         int(data.ray_count),
         int(data.ray_max_bounces),
         tuple(float(round(value, 3)) for value in data.bounds_xy),
@@ -653,6 +694,7 @@ def _trace_static_rays(
     static_cell_normals: np.ndarray,
     directions: np.ndarray,
     grid_max_distance: float,
+    trace_bounds_xyz: tuple[float, float, float, float, float, float],
 ) -> list[list[RaySegment]]:
     signature = _static_ray_signature(data)
     cached = _STATIC_RAY_CACHE.get(signature)
@@ -673,6 +715,7 @@ def _trace_static_rays(
                     static_cell_normals,
                     int(data.ray_max_bounces),
                     grid_max_distance,
+                    trace_bounds_xyz,
                 )
             )
 
@@ -699,6 +742,7 @@ def compute_coverage(
     grid_diagonal = float(
         ((maxx - minx) ** 2 + (maxy - miny) ** 2 + (zmax - zmin) ** 2) ** 0.5
     )
+    trace_bounds_xyz = (minx, maxx, miny, maxy, zmin, zmax)
 
     static_reflectors = _gather_reflectors(data, buildings_mesh, None, boundary_mesh)
     full_reflectors = _gather_reflectors(data, buildings_mesh, ferry_mesh, boundary_mesh)
@@ -727,6 +771,7 @@ def compute_coverage(
         static_cell_normals,
         directions,
         grid_diagonal,
+        trace_bounds_xyz,
     )
     ferry_bounds_xyz = _mesh_bounds_xyz(ferry_mesh)
     static_ray_index = 0
@@ -746,6 +791,7 @@ def compute_coverage(
                     full_cell_normals,
                     int(data.ray_max_bounces),
                     grid_diagonal,
+                    trace_bounds_xyz,
                 )
             else:
                 segments = static_segments
