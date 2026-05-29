@@ -234,3 +234,5 @@ worker_logs/
 *.run.xml
 *.synctex.gz
 *.toc
+
+report/
